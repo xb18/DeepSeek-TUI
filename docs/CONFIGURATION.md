@@ -299,11 +299,15 @@ If a repo-local config declares `api_key`, `base_url`, `provider`,
 Codewhale ignores that key and keeps the user's global setting.
 
 The `codewhale` facade and `codewhale-tui` binary share the same config file for
-DeepSeek auth and model defaults. `codewhale auth set --provider deepseek` (and
-the legacy `codewhale login --api-key ...` alias) saves the key to
-`~/.codewhale/config.toml` (migrating legacy `~/.deepseek/config.toml` on first
-launch when needed), and `codewhale --model deepseek-v4-flash` is forwarded to
-the TUI as `DEEPSEEK_MODEL`.
+DeepSeek auth and model defaults. `codewhale auth set --provider deepseek` saves
+the key to `~/.codewhale/config.toml` (migrating legacy `~/.deepseek/config.toml`
+on first launch when needed), and `codewhale --model deepseek-v4-flash` is
+forwarded to the TUI as `DEEPSEEK_MODEL`.
+
+`codewhale login` signs in to the Codewhale account — it is the same browser
+device flow as `codewhale account login`, not a provider-key command. Provider
+credentials are configured exclusively through `codewhale auth set
+--provider <provider>`.
 
 That provider credential is distinct from the optional managed-product
 account. `codewhale account login` starts the Codewhale browser device flow;
@@ -313,6 +317,30 @@ credential manager. A file-backed session store exists only as an explicit
 development fallback. `codewhale account keys list|set|remove` manages the
 signed-in account's BYOK vault without displaying secret values. The older
 `codewhale cloud ...` spelling remains a command alias.
+
+### Portable config bundles
+
+`codewhale config export --portable [--project] [--out FILE]` writes a
+portable, secret-free bundle of your configuration: sorted TOML with
+credential and machine-specific keys (API keys, base URLs, socket paths)
+dropped, never a redacted placeholder in their place. Without `--out` the
+bundle goes to stdout.
+
+`codewhale config import <FILE|HTTPS_URL|-> [--dry-run] [--yes] [--project]`
+applies a bundle. The envelope is strict (`schema_version = 1`, kind
+`codewhale.portable-config`; unknown fields fail). Import prints a
+deterministic plan — added / changed / skipped / conflicting / rejected —
+then asks for consent unless `--yes` is given; headless use requires it.
+Credential-shaped entries are rejected by key name and by value shape;
+rejections name the field, never a value. Remote bundles come from HTTPS
+only (loopback http excepted) with a 5 MiB cap. Application backs up the
+target document to `<config>.bundle-backup-<timestamp>`, rolls back on any
+failure, and re-importing an applied bundle changes nothing.
+
+Sections map to scope: `[project]` entries land only in the workspace
+document (`--project`, which must target an actual workspace config),
+`[global]` only in the user-global one; `preferences`, `profiles`, and
+`plugins` apply at either scope.
 
 ### Credential read precedence (#5197)
 

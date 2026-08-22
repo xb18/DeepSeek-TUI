@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::client::DeepSeekClient;
 use crate::config::Config;
 use crate::llm_client::LlmClient;
+use crate::models::Role;
 use crate::models::{ContentBlock, Message, MessageRequest};
 use crate::session_manager::SessionManager;
 use crate::tools::spec::{ToolError, ToolResult};
@@ -373,7 +374,7 @@ impl McpServer {
 
         // Build message list
         let user_message = Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: prompt.to_string(),
                 cache_control: None,
@@ -461,7 +462,7 @@ impl McpServer {
             // to also append it to the stored thread and then the assistant response.
             if internal_name == "deepseek" {
                 convo.push(Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::Text {
                         text: prompt.to_string(),
                         cache_control: None,
@@ -469,7 +470,7 @@ impl McpServer {
                 });
             }
             convo.push(Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![ContentBlock::Text {
                     text: response_text.clone(),
                     cache_control: None,

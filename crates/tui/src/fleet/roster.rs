@@ -76,6 +76,9 @@ pub struct FleetRoster {
     /// personal edit that loses to a stale project copy otherwise changes
     /// nothing anywhere with no signal why.
     shadowed: Vec<ShadowedProfile>,
+    /// An explicitly selected v2 Fleet could not be loaded. Consumers retain
+    /// this error instead of silently substituting the legacy roster.
+    load_error: Option<String>,
 }
 
 /// A lower-precedence profile displaced by a higher layer for the same id.
@@ -147,6 +150,7 @@ impl FleetRoster {
         Self {
             members: Self::built_in_members(),
             shadowed: Vec::new(),
+            load_error: None,
         }
     }
 
@@ -160,6 +164,19 @@ impl FleetRoster {
         Self {
             members,
             shadowed: Vec::new(),
+            load_error: None,
+        }
+    }
+
+    /// An unusable explicitly selected Fleet. It deliberately contains no
+    /// fallback members: running a different team would hide the selection
+    /// failure.
+    #[must_use]
+    pub fn failed(error: impl Into<String>) -> Self {
+        Self {
+            members: Vec::new(),
+            shadowed: Vec::new(),
+            load_error: Some(error.into()),
         }
     }
 
@@ -264,6 +281,7 @@ impl FleetRoster {
                 id: id.clone(),
                 display_name: None,
                 description: profile.role.description.clone(),
+                requires: Vec::new(),
                 profile,
                 source: PathBuf::from("config.toml"),
                 origin: ProfileOrigin::Config,
@@ -353,7 +371,11 @@ impl FleetRoster {
         extras.sort_by_key(|a| a.id.to_lowercase());
         let mut members = built_ins;
         members.extend(extras);
-        Self { members, shadowed }
+        Self {
+            members,
+            shadowed,
+            load_error: None,
+        }
     }
 
     /// The default party. Built-ins carry no permission grants (permissions
@@ -470,6 +492,7 @@ impl FleetRoster {
             id: id.to_string(),
             display_name: None,
             description: Some(description.to_string()),
+            requires: Vec::new(),
             profile: FleetProfile {
                 slot,
                 role: FleetRole {
@@ -506,6 +529,12 @@ impl FleetRoster {
     #[must_use]
     pub fn members(&self) -> &[AgentProfile] {
         &self.members
+    }
+
+    /// Error from an explicitly selected Fleet, if loading it failed.
+    #[must_use]
+    pub fn load_error(&self) -> Option<&str> {
+        self.load_error.as_deref()
     }
 
     /// Per-member explicit model pins, keyed by lowercased member id.
@@ -980,6 +1009,12 @@ mod tests {
 
     #[test]
     fn broken_workspace_dir_degrades_to_built_ins_and_config() {
+        // `load` reads the real personal agent dir under CODEWHALE_HOME; a
+        // developer's own extra profiles must not change this assertion.
+        let _env_lock = crate::test_support::lock_test_env();
+        let isolated_home = TempDir::new().unwrap();
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", isolated_home.path());
         let tmp = TempDir::new().unwrap();
         // A malformed provider token is still a load failure (#4093 / #3965):
         // profile pins may name built-ins or simple custom ids like

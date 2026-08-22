@@ -7629,6 +7629,11 @@ fn fleet_exec_config_default_matches_subagent_depth() {
 }
 
 #[test]
+fn fleet_exec_model_turns_are_unbounded_by_default() {
+    assert_eq!(FleetExecConfig::default().max_turns, 0);
+}
+
+#[test]
 fn fleet_exec_config_parses_max_spawn_depth() {
     let config: ConfigToml = toml::from_str(
         r#"

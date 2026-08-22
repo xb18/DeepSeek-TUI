@@ -266,6 +266,34 @@ memory_path = "~/.codewhale/memory.md"
 allow_shell = true
 approval_policy = "on-request" # on-request | untrusted | never
 sandbox_mode = "workspace-write" # read-only | workspace-write | danger-full-access | external-sandbox
+
+# Whether a workspace-write sandbox also lets shell commands reach the
+# network. Default false: being allowed to edit this repository is not a
+# reason to be allowed to open outbound connections, so `curl`, package
+# installs, and `git fetch` are denied by the OS sandbox unless you opt in.
+# When a command is denied, Codewhale offers an elevation prompt that grants
+# network for that call only; set this to `true` to grant it for the whole
+# session instead. `danger-full-access` and `yolo` are unsandboxed and
+# unaffected by this key. Note that on platforms with no OS sandbox backend
+# (default Linux without bubblewrap, and Windows) nothing is enforced either
+# way -- `/status` and `doctor` both say so.
+# sandbox_network_access = false
+
+# Which other agents' instruction files to import as project instructions.
+# Empty by default. Codewhale reads AGENTS.md (the cross-agent standard) and
+# its own .codewhale/instructions.md without being asked; a CLAUDE.md,
+# .cursorrules, or .github/copilot-instructions.md written as law for a
+# different tool is not treated as law here until you say so. Codewhale's own
+# files always outrank anything imported.
+# Accepts: "claude", "cursor", "cline", "windsurf", "gemini", "copilot",
+# "muse", or "all". Env: CODEWHALE_PROJECT_INSTRUCTION_IMPORTS (comma-separated).
+# project_instruction_imports = ["claude"]
+#
+# Everything that reaches the model as standing project instruction authority —
+# the repository-root -> workspace AGENTS.md chain, the global fallback layer,
+# .codewhale/rules/*.md, and any imported foreign files — shares one 48 KiB
+# aggregate budget. Instructions claim it first and are trimmed from the
+# broadest scope inward, so the nearest-scope file is the last thing dropped.
 # prompt_suggestion = true  # opt-in: show ghost-text follow-up question in composer after each turn
 
 # Optional tab/window title shown as `[title] …` in front of the terminal
@@ -1508,7 +1536,8 @@ default_text_model = "deepseek-ai/deepseek-v4-pro"
 # allowed_tools = []
 # # Tools always disallowed (overrides role and task spec)
 # disallowed_tools = ["exec_shell"]
-# # Hard ceiling on worker steps (tool calls + model turns)
+# # Optional hard ceiling on worker steps (tool calls + model turns).
+# # Omit or set 0 for the unbounded default; use a positive value to opt in.
 # max_turns = 500
 # # Recursive child-agent depth for fleet workers. Shares ONE recursion axis
 # # with standalone sub-agents (a fleet worker IS a headless sub-agent).

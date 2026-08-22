@@ -78,6 +78,12 @@ const WORKFLOW_RESULT_MAX_CHARS: usize = 24_000;
 /// In-memory (and snapshot) event retention per run: only the newest events
 /// are kept; older ones remain in the per-event journal lines (#2974).
 const WORKFLOW_RUN_EVENTS_MAX_RETAINED: usize = 1_000;
+/// In-memory progress retention per run. Progress is journaled line-by-line,
+/// so the owner record only needs a bounded newest tail for status/history.
+const WORKFLOW_RUN_PROGRESS_MAX_RETAINED: usize = 1_000;
+/// In-memory structured dispatch-failure retention per run. The exact count
+/// is stored separately and each rejection remains durable as a typed event.
+const WORKFLOW_RUN_DISPATCH_FAILURES_MAX_RETAINED: usize = WORKFLOW_RESULT_DISPATCH_FAILURES_TAIL;
 /// Progress lines the host detail projection keeps for the run manager's
 /// detail pane — the newest few, matching what a human scans at a glance.
 const HOST_RUN_PROGRESS_TAIL: usize = 3;
@@ -275,8 +281,8 @@ struct WorkflowRunSummary {
     token_budget: Option<u64>,
     child_count: usize,
     schema_error_count: usize,
-    dispatch_failure_count: usize,
-    progress_count: usize,
+    dispatch_failure_count: u64,
+    progress_count: u64,
     last_progress: Option<String>,
     event_count: usize,
     last_event_type: Option<String>,
@@ -596,11 +602,19 @@ struct WorkflowRunRecord {
     workflow_goal: Option<String>,
     token_budget: Option<u64>,
     child_ids: Vec<String>,
+    /// Exact progress-line count, including entries older than `progress`'s
+    /// bounded in-memory tail. Legacy snapshots are repaired on hydration.
+    #[serde(default)]
+    progress_count: u64,
     progress: Vec<String>,
     #[serde(default)]
     events: Vec<WorkflowUiEvent>,
     schema_errors: Vec<WorkflowSchemaError>,
     /// Task dispatches the driver rejected before any child ran (#5035).
+    /// This is the exact, saturating total; `dispatch_failures` is only the
+    /// newest structured tail.
+    #[serde(default)]
+    dispatch_failure_count: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     dispatch_failures: Vec<WorkflowDispatchFailure>,
     result: Option<Value>,
@@ -651,9 +665,11 @@ impl WorkflowRunRecord {
             workflow_goal: spec.map(|spec| spec.goal.clone()),
             token_budget,
             child_ids: Vec::new(),
+            progress_count: 0,
             progress: Vec::new(),
             events: Vec::new(),
             schema_errors: Vec::new(),
+            dispatch_failure_count: 0,
             dispatch_failures: Vec::new(),
             result: None,
             execution: None,
@@ -684,6 +700,50 @@ impl WorkflowRunRecord {
         }
     }
 
+    /// Retain only the newest progress lines while preserving an exact,
+    /// saturating total for summaries and payload truncation receipts.
+    fn push_progress(&mut self, message: String) {
+        self.progress_count = self.progress_count.saturating_add(1);
+        self.progress.push(message);
+        if self.progress.len() > WORKFLOW_RUN_PROGRESS_MAX_RETAINED {
+            let overflow = self.progress.len() - WORKFLOW_RUN_PROGRESS_MAX_RETAINED;
+            self.progress.drain(..overflow);
+        }
+    }
+
+    /// Record one rejected task slot without allowing a malformed workflow's
+    /// rejection loop to grow the owner record without bound.
+    fn push_dispatch_failure(&mut self, failure: WorkflowDispatchFailure) {
+        self.dispatch_failure_count = self.dispatch_failure_count.saturating_add(1);
+        self.dispatch_failures.push(failure);
+        if self.dispatch_failures.len() > WORKFLOW_RUN_DISPATCH_FAILURES_MAX_RETAINED {
+            let overflow =
+                self.dispatch_failures.len() - WORKFLOW_RUN_DISPATCH_FAILURES_MAX_RETAINED;
+            self.dispatch_failures.drain(..overflow);
+        }
+    }
+
+    /// Repair legacy or malformed snapshot counters before exposing them.
+    /// A declared count may exceed the retained tail, but never trail it.
+    fn normalize_bounded_ledgers(&mut self) {
+        self.progress_count = self
+            .progress_count
+            .max(u64::try_from(self.progress.len()).unwrap_or(u64::MAX));
+        if self.progress.len() > WORKFLOW_RUN_PROGRESS_MAX_RETAINED {
+            let overflow = self.progress.len() - WORKFLOW_RUN_PROGRESS_MAX_RETAINED;
+            self.progress.drain(..overflow);
+        }
+
+        self.dispatch_failure_count = self
+            .dispatch_failure_count
+            .max(u64::try_from(self.dispatch_failures.len()).unwrap_or(u64::MAX));
+        if self.dispatch_failures.len() > WORKFLOW_RUN_DISPATCH_FAILURES_MAX_RETAINED {
+            let overflow =
+                self.dispatch_failures.len() - WORKFLOW_RUN_DISPATCH_FAILURES_MAX_RETAINED;
+            self.dispatch_failures.drain(..overflow);
+        }
+    }
+
     fn summary(&self) -> WorkflowRunSummary {
         WorkflowRunSummary {
             run_id: self.run_id.clone(),
@@ -697,8 +757,8 @@ impl WorkflowRunRecord {
             token_budget: self.token_budget,
             child_count: self.child_ids.len(),
             schema_error_count: self.schema_errors.len(),
-            dispatch_failure_count: self.dispatch_failures.len(),
-            progress_count: self.progress.len(),
+            dispatch_failure_count: self.dispatch_failure_count,
+            progress_count: self.progress_count,
             last_progress: self.progress.last().cloned(),
             event_count: usize::try_from(self.events_total.max(self.events.len() as u64))
                 .unwrap_or(usize::MAX),
@@ -1738,13 +1798,17 @@ async fn run_workflow_vm(
                     .iter()
                     .filter(|task| task.status == IrWorkflowRunStatus::Failed)
                     .count();
-                let rejected = record.dispatch_failures.len();
+                let rejected = record.dispatch_failure_count;
                 if record.child_ids.is_empty() && rejected > 0 {
                     // #5035: every dispatch was rejected before a child ran.
                     status = WorkflowRunStatus::Failed;
+                    let retained_detail = record
+                        .dispatch_failures
+                        .first()
+                        .map(|failure| format!("; retained detail: {}", failure.message))
+                        .unwrap_or_default();
                     error = Some(format!(
-                        "no child agents ran: all {rejected} task dispatch(es) were rejected; first: {}",
-                        record.dispatch_failures[0].message
+                        "no child agents ran: all {rejected} task dispatch(es) were rejected{retained_detail}"
                     ));
                 } else if failed_children > 0 || rejected > 0 {
                     status = WorkflowRunStatus::Degraded;
@@ -1904,11 +1968,19 @@ fn render_run_report(record: &WorkflowRunRecord) -> String {
     if let Some(error) = record.error.as_deref() {
         out.push_str(&format!("- error: {error}\n"));
     }
-    if !record.dispatch_failures.is_empty() {
+    if record.dispatch_failure_count > 0 {
         out.push_str(&format!(
             "\n## Dispatch failures ({})\n\n",
-            record.dispatch_failures.len()
+            record.dispatch_failure_count
         ));
+        let omitted = record
+            .dispatch_failure_count
+            .saturating_sub(u64::try_from(record.dispatch_failures.len()).unwrap_or(u64::MAX));
+        if omitted > 0 {
+            out.push_str(&format!(
+                "- {omitted} older failure receipt(s) omitted from this bounded report; see the workflow journal\n"
+            ));
+        }
         for failure in &record.dispatch_failures {
             let slot = failure
                 .label
@@ -2058,9 +2130,10 @@ fn workflow_result_for(
 struct RunPayloadBounds {
     events_returned: usize,
     events_omitted: usize,
-    progress_omitted: usize,
+    progress_returned: usize,
+    progress_omitted: u64,
     dispatch_failures_returned: usize,
-    dispatch_failures_omitted: usize,
+    dispatch_failures_omitted: u64,
     dispatch_failure_fields_truncated: usize,
     result_truncated: bool,
     leaf_outputs_truncated: usize,
@@ -2103,6 +2176,15 @@ fn bounded_run_record_value(
         return (value, bounds);
     };
 
+    // The structured failure tail below is intentionally clipped, but panel
+    // summaries still need the exact saturating total to remain truthful
+    // after replay.
+    obj.insert(
+        "dispatch_failure_count".to_string(),
+        json!(record.dispatch_failure_count),
+    );
+    obj.insert("progress_count".to_string(), json!(record.progress_count));
+
     if let Some(events) = obj.get_mut("events").and_then(Value::as_array_mut) {
         if events.len() > WORKFLOW_RESULT_EVENTS_TAIL {
             let omitted = events.len() - WORKFLOW_RESULT_EVENTS_TAIL;
@@ -2122,17 +2204,21 @@ fn bounded_run_record_value(
         );
     }
 
-    if let Some(progress) = obj.get_mut("progress").and_then(Value::as_array_mut)
-        && progress.len() > WORKFLOW_RESULT_PROGRESS_TAIL
-    {
-        let omitted = progress.len() - WORKFLOW_RESULT_PROGRESS_TAIL;
-        progress.drain(..omitted);
-        bounds.progress_omitted = omitted;
+    if let Some(progress) = obj.get_mut("progress").and_then(Value::as_array_mut) {
+        if progress.len() > WORKFLOW_RESULT_PROGRESS_TAIL {
+            let omitted = progress.len() - WORKFLOW_RESULT_PROGRESS_TAIL;
+            progress.drain(..omitted);
+        }
+        bounds.progress_returned = progress.len();
+        let returned = u64::try_from(bounds.progress_returned).unwrap_or(u64::MAX);
+        bounds.progress_omitted = record.progress_count.saturating_sub(returned);
+    }
+    if bounds.progress_omitted > 0 {
         obj.insert(
             "progress_note".to_string(),
             json!(format!(
-                "showing the newest {WORKFLOW_RESULT_PROGRESS_TAIL} of {} progress lines; full log: {journal}",
-                omitted + WORKFLOW_RESULT_PROGRESS_TAIL,
+                "showing the newest {} of {} progress lines; full log: {journal}",
+                bounds.progress_returned, record.progress_count,
             )),
         );
     }
@@ -2144,7 +2230,6 @@ fn bounded_run_record_value(
         if failures.len() > WORKFLOW_RESULT_DISPATCH_FAILURES_TAIL {
             let omitted = failures.len() - WORKFLOW_RESULT_DISPATCH_FAILURES_TAIL;
             failures.drain(..omitted);
-            bounds.dispatch_failures_omitted = omitted;
         }
         bounds.dispatch_failures_returned = failures.len();
         for failure in failures {
@@ -2168,13 +2253,15 @@ fn bounded_run_record_value(
             }
         }
     }
+    bounds.dispatch_failures_omitted = record
+        .dispatch_failure_count
+        .saturating_sub(u64::try_from(bounds.dispatch_failures_returned).unwrap_or(u64::MAX));
     if bounds.dispatch_failures_omitted > 0 || bounds.dispatch_failure_fields_truncated > 0 {
         obj.insert(
             "dispatch_failures_note".to_string(),
             json!(format!(
                 "showing {} of {} dispatch failures with bounded fields; full record: {journal}",
-                bounds.dispatch_failures_returned,
-                bounds.dispatch_failures_returned + bounds.dispatch_failures_omitted,
+                bounds.dispatch_failures_returned, record.dispatch_failure_count,
             )),
         );
     }
@@ -3867,9 +3954,9 @@ impl SubAgentWorkflowDriver {
         if let Ok(mut runs) = self.state.runs.lock()
             && let Some(record) = runs.get_mut(&self.run_id)
         {
-            record.progress.push(progress_line.clone());
+            record.push_progress(progress_line.clone());
             record.push_event(ui_event.clone());
-            record.dispatch_failures.push(failure);
+            record.push_dispatch_failure(failure);
         }
         self.state.record_progress(&self.run_id, &progress_line);
         self.state.record_event(&self.run_id, &ui_event);
@@ -4190,7 +4277,7 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
         if let Ok(mut runs) = self.state.runs.lock()
             && let Some(record) = runs.get_mut(&self.run_id)
         {
-            record.progress.push(message.clone());
+            record.push_progress(message.clone());
             record.push_event(ui_event.clone());
             if let Some(schema_error) = schema_error {
                 record.schema_errors.push(schema_error);
@@ -4708,8 +4795,9 @@ fn now_ms() -> u64 {
 
 mod journal {
     use super::{
-        SharedWorkflowControllers, SharedWorkflowLifecycles, SharedWorkflowRuns, WorkflowRunRecord,
-        WorkflowRunStatus, WorkflowUiEvent, WorkflowWorkLifecycle,
+        SharedWorkflowControllers, SharedWorkflowLifecycles, SharedWorkflowRuns,
+        WorkflowDispatchFailure, WorkflowRunRecord, WorkflowRunStatus, WorkflowUiEvent,
+        WorkflowUiEventKind, WorkflowWorkLifecycle,
     };
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
@@ -4934,16 +5022,32 @@ mod journal {
                 };
                 match record {
                     WorkflowJournalRecord::Snapshot { run } => {
-                        runs.insert(run.run_id.clone(), *run);
+                        let mut run = *run;
+                        run.normalize_bounded_ledgers();
+                        runs.insert(run.run_id.clone(), run);
                     }
                     WorkflowJournalRecord::Progress { run_id, message } => {
                         if let Some(run) = runs.get_mut(&run_id) {
-                            run.progress.push(message);
+                            run.push_progress(message);
                         }
                     }
                     WorkflowJournalRecord::Event { run_id, event } => {
                         if let Some(run) = runs.get_mut(&run_id) {
-                            run.push_event(*event);
+                            let event = *event;
+                            if let WorkflowUiEventKind::TaskDispatchFailed {
+                                label,
+                                phase,
+                                message,
+                            } = &event.kind
+                            {
+                                run.push_dispatch_failure(WorkflowDispatchFailure {
+                                    at_ms: event.at_ms,
+                                    label: label.clone(),
+                                    phase: phase.clone(),
+                                    message: message.clone(),
+                                });
+                            }
+                            run.push_event(event);
                         }
                     }
                 }
@@ -4951,6 +5055,7 @@ mod journal {
             // Journals written before #2974 have no counters; rebuild them
             // from the retained tail so summaries stay truthful.
             for run in runs.values_mut() {
+                run.normalize_bounded_ledgers();
                 run.events_total = run.events_total.max(run.events.len() as u64);
             }
             // A run journaled as Running belongs to a process that is gone;
@@ -5022,7 +5127,7 @@ mod journal {
 
     #[cfg(test)]
     mod tests {
-        use super::super::WorkflowUiEventKind;
+        use super::super::{WORKFLOW_RUN_DISPATCH_FAILURES_MAX_RETAINED, WorkflowUiEventKind};
         use super::*;
 
         fn sample_record(run_id: &str, status: WorkflowRunStatus) -> WorkflowRunRecord {
@@ -5038,9 +5143,11 @@ mod journal {
                 workflow_goal: Some("journal test".to_string()),
                 token_budget: None,
                 child_ids: Vec::new(),
+                progress_count: 0,
                 progress: Vec::new(),
                 events: Vec::new(),
                 schema_errors: Vec::new(),
+                dispatch_failure_count: 0,
                 dispatch_failures: Vec::new(),
                 result: None,
                 execution: None,
@@ -5163,6 +5270,76 @@ mod journal {
                     .map(WorkflowUiEvent::event_type)
                     .collect::<Vec<_>>(),
                 vec!["phase_started", "handoff_promoted", "handoff_consumed"]
+            );
+        }
+
+        #[test]
+        fn workflow_journal_rebuilds_a_bounded_exact_rejection_ledger() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let state = WorkflowWorkspaceState::open(tmp.path());
+            state.record_snapshot(&sample_record(
+                "workflow_rejections",
+                WorkflowRunStatus::Running,
+            ));
+            let total = WORKFLOW_RUN_DISPATCH_FAILURES_MAX_RETAINED + 5;
+            for index in 0..total {
+                let message = format!("invalid task options {index}");
+                state.record_progress(
+                    "workflow_rejections",
+                    &format!("dispatch failed for rejected-{index}: {message}"),
+                );
+                state.record_event(
+                    "workflow_rejections",
+                    &WorkflowUiEvent::at(
+                        index as u64,
+                        "session-journal",
+                        WorkflowUiEventKind::TaskDispatchFailed {
+                            label: Some(format!("rejected-{index}")),
+                            phase: Some("fan-out".to_string()),
+                            message,
+                        },
+                    ),
+                );
+            }
+            drop(state);
+
+            let reloaded = WorkflowWorkspaceState::open(tmp.path());
+            let run = reloaded
+                .runs
+                .lock()
+                .expect("runs lock")
+                .get("workflow_rejections")
+                .cloned()
+                .expect("hydrated rejection run");
+            assert_eq!(run.progress_count, total as u64);
+            assert_eq!(run.progress.len(), total);
+            assert_eq!(run.dispatch_failure_count, total as u64);
+            assert_eq!(
+                run.dispatch_failures.len(),
+                WORKFLOW_RUN_DISPATCH_FAILURES_MAX_RETAINED
+            );
+            assert_eq!(
+                run.dispatch_failures
+                    .first()
+                    .and_then(|failure| failure.label.as_deref()),
+                Some("rejected-5")
+            );
+            drop(reloaded);
+
+            // Restart recovery appends a compact snapshot. Replaying the
+            // journal again must not double-count its earlier event lines.
+            let reopened = WorkflowWorkspaceState::open(tmp.path());
+            let run = reopened
+                .runs
+                .lock()
+                .expect("runs lock")
+                .get("workflow_rejections")
+                .cloned()
+                .expect("rehydrated rejection run");
+            assert_eq!(run.dispatch_failure_count, total as u64);
+            assert_eq!(
+                run.dispatch_failures.len(),
+                WORKFLOW_RUN_DISPATCH_FAILURES_MAX_RETAINED
             );
         }
 
@@ -5339,11 +5516,9 @@ mod journal {
             let state = WorkflowWorkspaceState::open(tmp.path());
             let mut record = sample_record("workflow_detail", WorkflowRunStatus::Running);
             record.workflow_goal = Some("audit provider errors".to_string());
-            record.progress = vec![
-                "phase: scan".to_string(),
-                "child slow-1 done".to_string(),
-                "child slow-2 failed".to_string(),
-            ];
+            for message in ["phase: scan", "child slow-1 done", "child slow-2 failed"] {
+                record.push_progress(message.to_string());
+            }
             state.record_snapshot(&record);
             drop(state);
 
@@ -5879,7 +6054,7 @@ mod tests {
         );
         record.status = WorkflowRunStatus::Completed;
         record.workflow_goal = Some("prove the report artifact".to_string());
-        record.progress.push("phase: scan".to_string());
+        record.push_progress("phase: scan".to_string());
         record.result = Some(serde_json::json!({"confirmed": 2}));
 
         write_run_report_artifact(tmp.path(), &record);
@@ -7254,12 +7429,12 @@ workflow({
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn declarative_max_steps_zero_stops_before_provider_call() {
+    async fn declarative_max_steps_zero_runs_without_a_turn_cap() {
         let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
-        let (client, calls) = fake_chat_client("must not be called").await;
+        let (client, calls) = fake_chat_client("Completed without a turn cap.").await;
         let runtime = SubAgentRuntime::new(
             client,
             "deepseek-v4-flash".to_string(),
@@ -7276,11 +7451,11 @@ workflow({
                     "action": "run",
                     "script": r#"
                     workflow({
-                      "goal": "prove the child step cap reaches runtime",
+                      "goal": "prove zero means an unbounded child loop",
                       "nodes": [{
                         "agent": {
                           "id": "zero-step",
-                          "prompt": "Do not start a model turn.",
+                          "prompt": "Complete this task.",
                           "budget": { "max_steps": 0, "timeout_secs": 90 }
                         }
                       }]
@@ -7290,17 +7465,17 @@ workflow({
                 &ctx,
             )
             .await
-            .expect("failed workflow still returns its terminal receipt");
+            .expect("workflow returns its terminal receipt");
         let payload: Value = serde_json::from_str(&result.content).expect("workflow JSON");
 
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            0,
-            "provider must not be called"
+            1,
+            "an unbounded child must be allowed to start a model turn"
         );
-        assert_eq!(payload["status"], "failed", "{payload}");
+        assert_eq!(payload["status"], "completed", "{payload}");
         assert_eq!(
-            payload["execution"]["leaf_results"][0]["status"], "failed",
+            payload["execution"]["leaf_results"][0]["status"], "succeeded",
             "{payload}"
         );
     }
@@ -10612,6 +10787,74 @@ FINAL RECEIPT
     }
 
     #[test]
+    fn run_record_progress_and_rejection_ledgers_are_bounded_with_exact_counts() {
+        let mut record = WorkflowRunRecord::new(
+            "workflow_rejection_loop".to_string(),
+            Some("session-test".to_string()),
+            None,
+            None,
+            None,
+        );
+        let progress_total = WORKFLOW_RUN_PROGRESS_MAX_RETAINED + 7;
+        for index in 0..progress_total {
+            record.push_progress(format!("progress {index}"));
+        }
+        let rejection_total = WORKFLOW_RUN_DISPATCH_FAILURES_MAX_RETAINED + 7;
+        for index in 0..rejection_total {
+            record.push_dispatch_failure(WorkflowDispatchFailure {
+                at_ms: index as u64,
+                label: Some(format!("rejected-{index}")),
+                phase: Some("fan-out".to_string()),
+                message: "invalid task options".to_string(),
+            });
+        }
+
+        assert_eq!(record.progress.len(), WORKFLOW_RUN_PROGRESS_MAX_RETAINED);
+        assert_eq!(record.progress_count, progress_total as u64);
+        assert_eq!(
+            record.progress.first().map(String::as_str),
+            Some("progress 7")
+        );
+        assert_eq!(
+            record.dispatch_failures.len(),
+            WORKFLOW_RUN_DISPATCH_FAILURES_MAX_RETAINED
+        );
+        assert_eq!(record.dispatch_failure_count, rejection_total as u64);
+        assert_eq!(record.dispatch_failures[0].at_ms, 7);
+
+        let summary = record.summary();
+        assert_eq!(summary.progress_count, progress_total as u64);
+        assert_eq!(summary.dispatch_failure_count, rejection_total as u64);
+
+        let (payload, bounds) = bounded_run_record_value(&record, Path::new("workflow-runs.jsonl"));
+        assert_eq!(payload["progress_count"], progress_total as u64);
+        assert_eq!(payload["dispatch_failure_count"], rejection_total as u64);
+        assert_eq!(
+            bounds.dispatch_failures_omitted,
+            (rejection_total - WORKFLOW_RESULT_DISPATCH_FAILURES_TAIL) as u64
+        );
+
+        // Imported counters can already be saturated. Another rejection must
+        // retain its newest detail without wrapping the authoritative total.
+        record.dispatch_failure_count = u64::MAX;
+        record.push_dispatch_failure(WorkflowDispatchFailure {
+            at_ms: u64::MAX,
+            label: None,
+            phase: None,
+            message: "malformed rejection loop".to_string(),
+        });
+        assert_eq!(record.dispatch_failure_count, u64::MAX);
+        assert_eq!(
+            record.dispatch_failures.len(),
+            WORKFLOW_RUN_DISPATCH_FAILURES_MAX_RETAINED
+        );
+        assert_eq!(
+            record.dispatch_failures.last().map(|failure| failure.at_ms),
+            Some(u64::MAX)
+        );
+    }
+
+    #[test]
     fn workflow_status_payload_bounds_oversized_run_records() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let state = WorkflowWorkspaceState::open(tmp.path());
@@ -10635,10 +10878,10 @@ FINAL RECEIPT
             ));
         }
         for index in 0..60 {
-            record.progress.push(format!("progress line {index}"));
+            record.push_progress(format!("progress line {index}"));
         }
         for index in 0..40u64 {
-            record.dispatch_failures.push(WorkflowDispatchFailure {
+            record.push_dispatch_failure(WorkflowDispatchFailure {
                 at_ms: index,
                 label: Some(format!("rejected-{index}")),
                 phase: Some("fan-out".to_string()),
@@ -10703,6 +10946,10 @@ FINAL RECEIPT
             "{payload}"
         );
         assert_eq!(dispatch_failures[0]["at_ms"], 28);
+        assert_eq!(
+            payload["dispatch_failure_count"], 40,
+            "exact count must survive the bounded failure tail"
+        );
         assert!(
             dispatch_failures.iter().all(|failure| failure["message"]
                 .as_str()

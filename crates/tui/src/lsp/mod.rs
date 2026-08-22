@@ -501,6 +501,37 @@ impl LspManager {
         }
     }
 
+    /// Read diagnostics for several existing files through the shared LSP
+    /// transport pool. Empty diagnostics remain represented as empty blocks;
+    /// an unavailable language server is returned as an actionable error.
+    pub async fn diagnostics_for_paths(
+        &self,
+        files: &[PathBuf],
+    ) -> Result<Vec<DiagnosticBlock>, String> {
+        if !self.config.enabled {
+            return Err("LSP is disabled ([lsp] enabled = false)".to_string());
+        }
+
+        let mut blocks = Vec::with_capacity(files.len());
+        for file in files {
+            if self.transport_for_path(file).await.is_none() {
+                return Err(format!(
+                    "no LSP server is available for {}",
+                    relative_to_workspace(&self.workspace, file).display()
+                ));
+            }
+            blocks.push(
+                self.diagnostics_for(file, 0)
+                    .await
+                    .unwrap_or_else(|| DiagnosticBlock {
+                        file: relative_to_workspace(&self.workspace, file),
+                        items: Vec::new(),
+                    }),
+            );
+        }
+        Ok(blocks)
+    }
+
     /// Best-effort shutdown of every spawned transport. Called when the
     /// session ends.
     #[allow(dead_code)]

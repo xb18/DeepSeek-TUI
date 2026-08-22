@@ -47,6 +47,7 @@ use crate::config::{ApiProvider, Config};
 use crate::fleet::profile::AgentProfile;
 use crate::fleet::roster::{FleetRoster, ProfileOrigin};
 use crate::llm_client::LlmClient;
+use crate::models::Role;
 use crate::tui::app::ReasoningEffort;
 
 /// Where exact fleet definitions and Reasoning Router profiles are looked up,
@@ -1026,7 +1027,7 @@ impl FleetRouterCaller for LiveFleetRouter {
         let request = MessageRequest {
             model: self.route.wire_model.clone(),
             messages: vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: router_user_message(input),
                     cache_control: None,
@@ -1693,6 +1694,7 @@ fn exact_member_profile(
             "Exact fleet member `{}` (role `{}`), pinned to {provider}/{wire_model}.",
             member.id, member.role
         )),
+        requires: Vec::new(),
         profile,
         source: source
             .map(std::path::Path::to_path_buf)

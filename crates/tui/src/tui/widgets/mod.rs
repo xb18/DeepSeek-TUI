@@ -968,11 +968,19 @@ impl ChatWidget {
         if self.ambient_life
             && let Some(inks) = self.ambient_inks
         {
+            // The scatter has a centre. It used to be column 0 with a row in
+            // the middle of the field, which is neither where the school
+            // swims nor anywhere the eye is: the flee proximity test
+            // (|dy| < 6) could not even fire on a tall field, and when it did
+            // every fish was to the right of the anchor so the whole school
+            // slid the same way. Anchored on the composer's centre line and
+            // the school's own band, a turn beginning reads as the shoal
+            // parting around the thing that just happened.
             let cursor = crate::tui::ambient_life::AmbientCursor {
-                // Pointer column is refined by hover_layer when available; row
-                // participates in vertical flee proximity.
-                column: 0,
-                row: area.y.saturating_add(area.height / 2),
+                column: area.x.saturating_add(area.width / 2),
+                row: area
+                    .y
+                    .saturating_add(crate::tui::ambient_life::school_band_row(area)),
                 flee_elapsed_ms: self.fish_flee_elapsed_ms,
             };
             // Whale cameo rides the completion breath clock when present.
@@ -6702,18 +6710,23 @@ mod tests {
         let mut header = Buffer::empty(header_area);
         crate::tui::underwater::render_header(header_area, &mut header, &app);
 
-        // Footer while working carries the braille state marker.
+        // Activity band while working carries the braille state marker;
+        // the identity band below the composer carries the route.
         app.is_loading = true;
-        let footer_area = Rect::new(0, 0, 100, 1);
-        let mut footer = Buffer::empty(footer_area);
-        crate::tui::underwater::render_footer(footer_area, &mut footer, &mut app);
+        let activity_area = Rect::new(0, 0, 100, 1);
+        let mut activity = Buffer::empty(activity_area);
+        crate::tui::phase_strip::render_activity(activity_area, &mut activity, &mut app);
+        let identity_area = Rect::new(0, 0, 100, 1);
+        let mut identity = Buffer::empty(identity_area);
+        crate::tui::phase_strip::render_identity(identity_area, &mut identity, &mut app);
         app.is_loading = false;
 
         for (surface, buf, rect) in [
             ("idle transcript", &transcript, transcript_area),
             ("launch", &launch, launch_area),
             ("header", &header, header_area),
-            ("footer", &footer, footer_area),
+            ("activity band", &activity, activity_area),
+            ("identity band", &identity, identity_area),
         ] {
             for y in rect.y..rect.bottom() {
                 for x in rect.x..rect.right() {
@@ -6891,12 +6904,12 @@ mod tests {
         assert!(!fish_heading(74, 73, 72, true));
     }
 
-    #[test]
-    fn browsing_history_keeps_fish_in_available_water() {
+    /// Render a chat field carrying `rows` of history and return its rows.
+    fn history_field_rows(rows: usize) -> Vec<String> {
         let mut app = create_test_app();
         app.low_motion = false;
         app.fancy_animations = true;
-        for index in 0..30 {
+        for index in 0..rows {
             app.add_message(HistoryCell::Assistant {
                 content: format!("history row {index}"),
                 streaming: false,
@@ -6907,13 +6920,54 @@ mod tests {
         let widget = ChatWidget::new(&mut app, area);
         assert!(widget.ambient_life);
         assert!(widget.ocean_animated);
-
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
-        let rendered = buffer_text(&buf, area);
+        buffer_text(&buf, area)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn browsing_history_keeps_fish_in_available_water() {
+        // Open water below a short transcript still holds the school, and a
+        // fish never shares a row with the text — not even the row above or
+        // below it. That clearance is the whole point: a fish in the gap
+        // between two lines is inside the writing, not behind it.
+        let rows = history_field_rows(4);
+        let rendered = rows.join("\n");
         assert!(
             rendered.contains("><>") || rendered.contains("<><"),
-            "scrollback should keep fish in collision-free cells:\n{rendered}"
+            "open water below the transcript should hold fish:\n{rendered}"
+        );
+        let text_rows: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.contains("history row"))
+            .map(|(index, _)| index)
+            .collect();
+        assert!(!text_rows.is_empty(), "fixture rendered no history");
+        for (index, row) in rows.iter().enumerate() {
+            if !(row.contains("><") || row.contains("<>")) {
+                continue;
+            }
+            assert!(
+                text_rows.iter().all(|text| index.abs_diff(*text) > 1),
+                "a fish surfaced inside the transcript at row {index}:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_field_full_of_transcript_holds_no_fish() {
+        // The other end of the same rule. When the reader has filled the
+        // field there is no water left, and the honest answer is stillness:
+        // motion beside the line someone is reading is the same failure as
+        // clutter, just harder to argue with.
+        let rendered = history_field_rows(30).join("\n");
+        assert!(
+            !rendered.contains("><>") && !rendered.contains("<><"),
+            "a full transcript is not an aquarium:\n{rendered}"
         );
     }
 

@@ -282,10 +282,11 @@ impl FleetManager {
         self
     }
 
-    /// Merged agent roster (built-ins + `[fleet.profiles]` + workspace files)
-    /// used everywhere a task references an `agent_profile` id.
+    /// Effective session roster used everywhere a task references an
+    /// `agent_profile` id. A selected v2 Fleet is authoritative; the merged
+    /// legacy profile layers remain the fallback only when no Fleet is selected.
     fn agent_roster(&self) -> crate::fleet::roster::FleetRoster {
-        crate::fleet::roster::FleetRoster::load(&self.fleet_config, &self.workspace)
+        crate::fleet::identity::load_effective_roster(&self.fleet_config, &self.workspace, None)
     }
 
     /// Attach a sub-agent manager so fleet workers can spawn real headless agents.

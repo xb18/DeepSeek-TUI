@@ -340,8 +340,9 @@ max_concurrent = 20
 launch_concurrency = 20
 max_admitted = 200
 max_depth = 6
-# Per-child run budgets when a call carries none (role defaults: 60/120 turns).
-default_max_steps = 120
+# Omitted or zero model-step budget is unbounded. Set a positive value only
+# when an operator deliberately wants a per-child cap.
+default_max_steps = 0
 default_wall_time_secs = 1800
 token_budget = 100000
 
@@ -418,13 +419,13 @@ from, in order:
    (replay compat),
 2. the operator defaults `[subagents] default_max_steps` and
    `[subagents] default_wall_time_secs`,
-3. Fleet role defaults: **60** model turns for read-mostly roles
-   (scout/planner/reviewer/verifier/consultant), **120** for
-   builder/worker/custom (`WorkerRuntimeProfile::default_max_steps`), and a
-   **1800 s** wall-clock default.
+3. Fleet role defaults: **unbounded model turns** for every role
+   (`WorkerRuntimeProfile::default_max_steps` returns zero), plus a **1800 s**
+   wall-clock default.
 
-Step values clamp to the 2000-turn hard ceiling; wall-time values clamp to
-1..=86400 s.
+Omitted or zero `max_steps` remains unbounded even when an operator default is
+configured; positive step values clamp to the 2000-turn hard ceiling.
+Wall-time values clamp to 1..=86400 s.
 
 ## Token budget governor
 

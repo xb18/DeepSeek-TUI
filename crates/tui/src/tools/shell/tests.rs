@@ -42,6 +42,55 @@ fn lowercase_bash_schema_is_small_contract() {
 }
 
 #[test]
+fn lowercase_bash_description_matches_the_timeout_it_actually_applies() {
+    use super::{
+        CONTRACT_BASH_FOREGROUND_DEFAULT_TIMEOUT_MS, contract_bash_legacy_input,
+        contract_bash_timeout_ms,
+    };
+
+    // `bash {command}` with no `timeout` translates to a legacy input carrying
+    // no `timeout_ms`, and the contract delegate then bounds the foreground run
+    // at the 120 s default and kills the process there.
+    let translated =
+        contract_bash_legacy_input(&json!({"command": "sleep 600"})).expect("translated input");
+    assert!(
+        translated.get("timeout_ms").is_none(),
+        "omitting `timeout` must not synthesise one during translation: {translated}"
+    );
+    assert_eq!(
+        contract_bash_timeout_ms(true, None, false, false),
+        Some(CONTRACT_BASH_FOREGROUND_DEFAULT_TIMEOUT_MS)
+    );
+
+    // The tool description is the only place the model learns this. It used to
+    // say "when omitted there is no default timeout", so a model running a
+    // four-minute build had every reason not to pass a timeout, and got the
+    // process killed at two minutes anyway.
+    let description = LowercaseBashTool.description();
+    assert!(
+        !description.contains("no default timeout"),
+        "description contradicts the applied default: {description}"
+    );
+    let default_seconds = CONTRACT_BASH_FOREGROUND_DEFAULT_TIMEOUT_MS / 1_000;
+    assert!(
+        description.contains(&format!("{default_seconds} seconds")),
+        "description must name the default it applies: {description}"
+    );
+    let schema = LowercaseBashTool.input_schema();
+    let timeout_doc = schema["properties"]["timeout"]["description"]
+        .as_str()
+        .expect("timeout description");
+    assert!(
+        !timeout_doc.contains("no default timeout"),
+        "schema contradicts the applied default: {timeout_doc}"
+    );
+    assert!(
+        timeout_doc.contains(&format!("{default_seconds} seconds")),
+        "schema must name the default it applies: {timeout_doc}"
+    );
+}
+
+#[test]
 fn contract_bash_foreground_without_a_timeout_is_bounded_not_endless() {
     use super::{
         BASH_MAX_TIMEOUT_MS, CONTRACT_BASH_FOREGROUND_DEFAULT_TIMEOUT_MS, contract_bash_timeout_ms,

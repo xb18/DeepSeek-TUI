@@ -1114,7 +1114,11 @@ pub fn apply_exec_hardening(
 ) -> AgentWorkerSpec {
     // Cap max_steps to config max_turns (0 means no cap).
     if exec.max_turns > 0 {
-        spec.max_steps = spec.max_steps.min(exec.max_turns);
+        spec.max_steps = if spec.max_steps == 0 {
+            exec.max_turns
+        } else {
+            spec.max_steps.min(exec.max_turns)
+        };
     }
     spec.max_spawn_depth = exec
         .max_spawn_depth
@@ -1556,6 +1560,7 @@ mod tests {
             id: id.to_string(),
             display_name: Some(format!("{role} profile")),
             description: Some(format!("{role} description")),
+            requires: Vec::new(),
             profile: codewhale_config::FleetProfile {
                 slot: codewhale_config::FleetSlot::from_name(role),
                 role: codewhale_config::FleetRole {
