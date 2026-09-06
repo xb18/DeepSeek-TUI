@@ -42,7 +42,7 @@ codewhale-workflow = { path = "../workflow", version = "0.9.12" }
 codewhale-workflow-js = { path = "../workflow-js", version = "0.9.12" }
 async-stream = "0.3.6"
 async-trait.workspace = true
-base64 = "0.22.1"
+base64 = "0.23.1"
 axum.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
