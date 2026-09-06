@@ -108,7 +108,32 @@ fn windows_home_from_environment() -> Option<PathBuf> {
 /// A valid explicit `CODEWHALE_HOME` is returned after `~` expansion. Otherwise
 /// this is `<user home>/.codewhale`.
 pub fn codewhale_home() -> Result<Option<PathBuf>, PathOverrideError> {
-    Ok(codewhale_home_override()?.or_else(|| user_home().map(|home| home.join(CODEWHALE_APP_DIR))))
+    Ok(codewhale_home_override()?
+        .or_else(|| TEST_HOME_OVERRIDE.get().cloned())
+        .or_else(|| user_home().map(|home| home.join(CODEWHALE_APP_DIR))))
+}
+
+static TEST_HOME_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Route every implicit home lookup in this process to `home` instead of the
+/// user's real `~/.codewhale`. An explicit `CODEWHALE_HOME` still wins.
+///
+/// Test harnesses install this once at start so a unit test that never
+/// sealed its environment cannot read or overwrite the developer's state
+/// (a provider-onboarding test once persisted a fixture provider into the
+/// founder's real `setup_state.json`, #5932). The first install wins and is
+/// returned as `true`; later calls are ignored. Production never calls this.
+#[doc(hidden)]
+pub fn install_test_home_override(home: PathBuf) -> bool {
+    TEST_HOME_OVERRIDE.set(home).is_ok()
+}
+
+/// The installed test home, if any. Lets a harness prove the override is in
+/// force before trusting an implicit lookup.
+#[doc(hidden)]
+#[must_use]
+pub fn test_home_override() -> Option<&'static std::path::Path> {
+    TEST_HOME_OVERRIDE.get().map(PathBuf::as_path)
 }
 
 /// Return the explicit config-file override, preferring the Codewhale name.

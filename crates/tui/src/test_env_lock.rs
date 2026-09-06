@@ -157,6 +157,7 @@ impl Drop for TestEnvLock {
 /// If a prior test panicked while holding the lock, recover the guard instead
 /// of cascading failures across unrelated tests.
 pub(crate) fn lock_test_env() -> TestEnvLock {
+    crate::test_support::ensure_test_home_override();
     let guard = match env_lock().lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),

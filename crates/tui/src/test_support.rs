@@ -22,7 +22,7 @@ pub(crate) use crate::shell_dispatcher::test_env_lock::{
 /// [`guarded_environment_provides_state_paths`], not assumed.
 pub(crate) fn isolated_test_state_root() -> &'static Path {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
-    ROOT.get_or_init(|| {
+    let root = ROOT.get_or_init(|| {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -38,7 +38,20 @@ pub(crate) fn isolated_test_state_root() -> &'static Path {
             )
         });
         root
-    })
+    });
+    // Every implicit `codewhale_home()` in this test process — including the
+    // ones in other crates, such as the setup transaction that writes
+    // `setup_state.json` — resolves under this root unless a test sealed an
+    // explicit `CODEWHALE_HOME` (#5932).
+    let _ = codewhale_paths::install_test_home_override(root.join("implicit-home"));
+    root
+}
+
+/// Make sure the process-wide test home override is installed. Called from
+/// the shared test entry points so a test that never sealed its environment
+/// still cannot reach the developer's real `~/.codewhale`.
+pub(crate) fn ensure_test_home_override() {
+    let _ = isolated_test_state_root();
 }
 
 /// Where the calling test's state should live when it has not sealed the
@@ -291,6 +304,7 @@ pub(crate) fn assert_byte_identical(label: &str, a: &str, b: &str) {
 
 /// Default `TuiOptions` for tests, pinned to the deepseek-v4-pro fixture route.
 pub(crate) fn test_tui_options(workspace: impl AsRef<Path>) -> crate::tui::app::TuiOptions {
+    ensure_test_home_override();
     let workspace = workspace.as_ref().to_path_buf();
     crate::tui::app::TuiOptions {
         model: "deepseek-v4-pro".to_string(),
@@ -363,6 +377,29 @@ pub(crate) fn test_app_with_options(options: crate::tui::app::TuiOptions) -> cra
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_unsealed_test_never_resolves_the_developers_real_home() {
+        use super::{EnvVarGuard, isolated_test_state_root, lock_test_env};
+        // The onboarding tests leaked a fixture provider into the founder's
+        // real setup_state.json through an implicit codewhale_home() (#5932).
+        let _lock = lock_test_env();
+        let _no_home = EnvVarGuard::remove("CODEWHALE_HOME");
+        let home = codewhale_paths::codewhale_home()
+            .expect("home resolves")
+            .expect("home present");
+        let real = codewhale_paths::user_home()
+            .expect("user home")
+            .join(".codewhale");
+        assert_ne!(home, real, "implicit lookups must not reach the real home");
+        assert!(
+            home.starts_with(isolated_test_state_root()),
+            "{} is not under the isolated test root",
+            home.display()
+        );
+        let setup_state = codewhale_config::SetupState::path().expect("setup state path");
+        assert!(setup_state.starts_with(isolated_test_state_root()));
+    }
+
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;

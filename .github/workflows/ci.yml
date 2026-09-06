@@ -595,8 +595,13 @@ jobs:
         # executable; retries are off, so a flake is a red run, not a hidden
         # one. nextest does not run doctests — the next step keeps them.
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
-        run: cargo nextest run --workspace --all-features --locked --profile ci
+        run: |
+          mkdir -p "${CODEWHALE_HOME}"
+          cargo nextest run --workspace --all-features --locked --profile ci
         env:
+          # No test may reach the runner's real home: a test that never seals
+          # its environment resolves here instead (#5932).
+          CODEWHALE_HOME: ${{ runner.temp }}/cw-test-home/.codewhale
           # Give test threads the stack the product gives itself. main.rs runs
           # the owner thread and every tokio worker at
           # CODEWHALE_MAIN_STACK_BYTES (16 MiB) because the engine and
