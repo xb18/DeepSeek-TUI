@@ -108,12 +108,27 @@ fn windows_home_from_environment() -> Option<PathBuf> {
 /// A valid explicit `CODEWHALE_HOME` is returned after `~` expansion. Otherwise
 /// this is `<user home>/.codewhale`.
 pub fn codewhale_home() -> Result<Option<PathBuf>, PathOverrideError> {
-    Ok(codewhale_home_override()?
-        .or_else(|| TEST_HOME_OVERRIDE.get().cloned())
-        .or_else(|| user_home().map(|home| home.join(CODEWHALE_APP_DIR))))
+    if let Some(explicit) = codewhale_home_override()? {
+        return Ok(Some(explicit));
+    }
+    let home = user_home();
+    // The test override stands in for the *developer's* home only. A test
+    // that redirected HOME to a temp dir (legacy-migration and
+    // product-dir tests) asked for the real fallback and gets it.
+    if let Some(test_home) = TEST_HOME_OVERRIDE.get()
+        && home.as_deref() == Some(test_home.real_user_home.as_path())
+    {
+        return Ok(Some(test_home.home.clone()));
+    }
+    Ok(home.map(|home| home.join(CODEWHALE_APP_DIR)))
 }
 
-static TEST_HOME_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+struct TestHomeOverride {
+    home: PathBuf,
+    real_user_home: PathBuf,
+}
+
+static TEST_HOME_OVERRIDE: std::sync::OnceLock<TestHomeOverride> = std::sync::OnceLock::new();
 
 /// Route every implicit home lookup in this process to `home` instead of the
 /// user's real `~/.codewhale`. An explicit `CODEWHALE_HOME` still wins.
@@ -125,7 +140,15 @@ static TEST_HOME_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::n
 /// returned as `true`; later calls are ignored. Production never calls this.
 #[doc(hidden)]
 pub fn install_test_home_override(home: PathBuf) -> bool {
-    TEST_HOME_OVERRIDE.set(home).is_ok()
+    let Some(real_user_home) = user_home() else {
+        return false;
+    };
+    TEST_HOME_OVERRIDE
+        .set(TestHomeOverride {
+            home,
+            real_user_home,
+        })
+        .is_ok()
 }
 
 /// The installed test home, if any. Lets a harness prove the override is in
@@ -133,7 +156,9 @@ pub fn install_test_home_override(home: PathBuf) -> bool {
 #[doc(hidden)]
 #[must_use]
 pub fn test_home_override() -> Option<&'static std::path::Path> {
-    TEST_HOME_OVERRIDE.get().map(PathBuf::as_path)
+    TEST_HOME_OVERRIDE
+        .get()
+        .map(|test_home| test_home.home.as_path())
 }
 
 /// Return the explicit config-file override, preferring the Codewhale name.
