@@ -3424,8 +3424,9 @@ impl App {
             ),
         };
         // The exact ladder the `/model` picker shows for this route, Auto
-        // routing included, so every press lands on a visibly different tier
-        // (#6650).
+        // routing included (#6650). On a concrete route every rung is a
+        // distinct effective tier; under Auto routing the tier is decided at
+        // dispatch, so neighbouring preferences may still resolve to one tier.
         let efforts = crate::tui::model_picker::picker_efforts_for_route(
             provider,
             base_url,
@@ -3439,7 +3440,9 @@ impl App {
         let anchor = if self.auto_model || efforts.contains(&current) {
             current
         } else {
-            let tier = current.normalize_for_route(provider, base_url, model);
+            let tier = crate::tui::model_picker::effective_tier_for_route(
+                current, provider, base_url, model,
+            );
             if efforts.contains(&tier) {
                 tier
             } else {

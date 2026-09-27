@@ -7605,73 +7605,129 @@ fn owned_restore_moves_the_journal_and_matches_the_borrowing_restore() {
     assert_eq!(legacy_owned.api_message_stamps.len(), 2);
 }
 
+/// Walk Ctrl+T for two full laps on a concrete route and assert that every
+/// press changes the effective tier — the value `/status`, the effort status
+/// line, and Work receipts report — not merely the requested label.
+fn assert_every_ctrl_t_press_changes_the_effective_tier(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> Vec<ReasoningEffort> {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = provider;
+    app.auto_model = false;
+    app.active_route_base_url = base_url.to_string();
+    app.model = model.to_string();
+    app.reasoning_effort = ReasoningEffort::Auto;
+    let ladder =
+        crate::tui::model_picker::picker_efforts_for_route(provider, base_url, model, false);
+    let mut effective = app.effective_reasoning_effort_for_active_route(app.reasoning_effort);
+    let mut walked = Vec::new();
+    // Two full laps: the report was about presses after the first lap.
+    for press in 0..ladder.len() * 2 {
+        assert_eq!(app.cycle_effort(), SettingSelection::Changed);
+        let next = app.effective_reasoning_effort_for_active_route(app.reasoning_effort);
+        assert_ne!(
+            next, effective,
+            "{model}: press {press} ({:?}) left the effective tier at {effective:?}",
+            app.reasoning_effort
+        );
+        effective = next;
+        walked.push(app.reasoning_effort);
+    }
+    let mut expected = ladder.clone();
+    expected.rotate_left(1);
+    expected.extend(expected.clone());
+    assert_eq!(walked, expected, "{model} walks the picker ladder");
+    ladder
+}
+
 #[test]
 fn every_ctrl_t_press_changes_the_effective_thinking_tier() {
-    // #6650: Ctrl+T walked rungs that resolved to the tier already in effect
-    // (and a 9-rung private ladder under Auto routing), so presses looked dead.
+    // #6650: Ctrl+T walked rungs that resolved to the tier already in effect,
+    // so presses looked dead.
     let _catalog = crate::provider_lake::lock_live_snapshot();
-    for (provider, base_url, model, auto_model) in [
+    crate::provider_lake::clear_live_snapshot();
+    for (provider, base_url, model) in [
         (
             ApiProvider::Deepseek,
             crate::config::DEFAULT_DEEPSEEK_BASE_URL,
             "deepseek-v4.1-flash",
-            false,
         ),
         (
             ApiProvider::Deepseek,
             crate::config::DEFAULT_DEEPSEEK_BASE_URL,
             "deepseek-v4.1",
-            false,
-        ),
-        (
-            ApiProvider::Deepseek,
-            crate::config::DEFAULT_DEEPSEEK_BASE_URL,
-            "deepseek-v4.1-flash",
-            true,
         ),
         (
             ApiProvider::Moonshot,
             crate::config::DEFAULT_KIMI_CODE_BASE_URL,
             crate::config::KIMI_CODE_K3_MODEL,
-            false,
         ),
         (
             ApiProvider::Xai,
             crate::config::DEFAULT_XAI_BASE_URL,
             crate::config::XAI_GROK_4_6_MODEL,
-            false,
         ),
     ] {
-        let mut app = App::new(test_options(false), &Config::default());
-        app.api_provider = provider;
-        app.auto_model = auto_model;
-        app.active_route_base_url = base_url.to_string();
-        app.model = model.to_string();
-        app.reasoning_effort = ReasoningEffort::Auto;
-        let ladder = crate::tui::model_picker::picker_efforts_for_route(
-            provider, base_url, model, auto_model,
-        );
-        let mut label = app.reasoning_effort_display_label();
-        let mut walked = Vec::new();
-        // Two full laps: the report was about presses after the first lap.
-        for press in 0..ladder.len() * 2 {
-            assert_eq!(app.cycle_effort(), SettingSelection::Changed);
-            let next = app.reasoning_effort_display_label();
-            assert_ne!(
-                next, label,
-                "{model} (auto={auto_model}) press {press} left the effective tier at {label}"
-            );
-            label = next;
-            walked.push(app.reasoning_effort);
-        }
-        let mut expected = ladder.clone();
-        expected.rotate_left(1);
-        expected.extend(expected.clone());
-        assert_eq!(
-            walked, expected,
-            "{model} (auto={auto_model}) walks the picker ladder"
-        );
+        assert_every_ctrl_t_press_changes_the_effective_tier(provider, base_url, model);
     }
+}
+
+#[test]
+fn ctrl_t_skips_catalog_rungs_that_resolve_to_an_offered_tier() {
+    // A catalog can publish effort spellings the route collapses: DeepSeek
+    // sends `medium`/`xhigh` as `high`, and Z.ai GLM-5.2 sends `low`/`medium`
+    // as `high`. Each Ctrl+T press must still reach a new effective tier.
+    use ReasoningEffort::{Auto, High, Low, Max, Off};
+    let _catalog = crate::provider_lake::lock_live_snapshot();
+    crate::provider_lake::clear_live_snapshot();
+    let fetched_at = u64::try_from(chrono::Utc::now().timestamp()).expect("timestamp");
+    let offering = |provider: ApiProvider, model: &str, values: &[&str]| {
+        codewhale_config::catalog::CatalogOffering {
+            provider: provider.as_str().to_string(),
+            wire_model_id: model.to_string(),
+            endpoint_key: "chat".to_string(),
+            reasoning_options: vec![serde_json::json!({ "type": "effort", "values": values })],
+            source: codewhale_config::catalog::CatalogSource::Live {
+                base_url_fingerprint: "models-dev-capabilities".to_string(),
+                fetched_at,
+            },
+            ..Default::default()
+        }
+    };
+    crate::provider_lake::set_live_snapshot(
+        codewhale_config::catalog::CatalogSnapshot {
+            offerings: vec![
+                offering(
+                    ApiProvider::Deepseek,
+                    "deepseek-v4.1-flash",
+                    &["low", "medium", "high", "xhigh", "max"],
+                ),
+                offering(
+                    ApiProvider::Zai,
+                    crate::config::ZAI_GLM_5_2_MODEL,
+                    &["off", "low", "medium", "high", "max"],
+                ),
+            ],
+        },
+        crate::provider_lake::LiveSource::ModelsDev,
+    );
+
+    let deepseek = assert_every_ctrl_t_press_changes_the_effective_tier(
+        ApiProvider::Deepseek,
+        crate::config::DEFAULT_DEEPSEEK_BASE_URL,
+        "deepseek-v4.1-flash",
+    );
+    let zai = assert_every_ctrl_t_press_changes_the_effective_tier(
+        ApiProvider::Zai,
+        crate::config::DEFAULT_ZAI_BASE_URL,
+        crate::config::ZAI_GLM_5_2_MODEL,
+    );
+    crate::provider_lake::clear_live_snapshot();
+
+    assert_eq!(deepseek, vec![Auto, Low, High, Max]);
+    assert_eq!(zai, vec![Auto, Off, High, Max]);
 }
 
 #[test]

@@ -10,8 +10,9 @@ use crate::work_graph::ReasoningEffortTier;
 /// Reasoning-effort tier, mirrored across DeepSeek and Codex effort pickers.
 ///
 /// The config file accepts every supported string value for forward-compat with
-/// providers that expose the full spectrum; DeepSeek currently collapses
-/// `Low`/`Medium` → `high`. OpenAI Codex normalizes inherited DeepSeek-only
+/// providers that expose the full spectrum; first-party DeepSeek routes send
+/// `low`/`high`/`max`, so `Minimal` → `low`, `Medium`/`XHigh` → `high`, and
+/// `Ultra` → `max`. OpenAI Codex normalizes inherited DeepSeek-only
 /// `Off` to `Low` and keeps `XHigh`, `Max`, and `Ultra` distinct at the
 /// provider boundary. The default keyboard cycler walks the three DeepSeek-distinct
 /// tiers: `Off` → `High` → `Max` → `Off`; provider-aware callers should use

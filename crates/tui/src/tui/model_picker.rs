@@ -4492,16 +4492,43 @@ pub(crate) fn picker_efforts_for_route(
     )
 }
 
+/// The tier a concrete route receives for `effort`: the route-constrained
+/// receipt tier when the route's dialect is narrower than the generic
+/// normalization (Z.ai GLM, Kimi Code K3), otherwise
+/// [`ReasoningEffort::normalize_for_route`]. This is the effective tier the
+/// effort status line and Work receipts report, so the ladder and the cycler
+/// dedupe against the same value the operator sees.
+pub(crate) fn effective_tier_for_route(
+    effort: ReasoningEffort,
+    provider: ApiProvider,
+    base_url: &str,
+    wire_model: &str,
+) -> ReasoningEffort {
+    match crate::work_graph::constrained_effective_reasoning_for_route(
+        effort.into(),
+        provider,
+        base_url,
+        wire_model,
+    )
+    .map(crate::reasoning_preference::EffectiveReasoningEffort::from)
+    {
+        Some(crate::reasoning_preference::EffectiveReasoningEffort::Tier(tier)) => tier,
+        _ => effort.normalize_for_route(provider, base_url, wire_model),
+    }
+}
+
 /// Drop rungs that resolve to the same effective tier as another rung on the
 /// route (#6650). The picker and the Ctrl+T cycler walk this ladder, so a rung
-/// whose route-normalized tier is already offered would be a row that changes
+/// whose effective tier is already offered would be a row that changes
 /// nothing and a key press that does nothing — DeepSeek's `medium` lands on
-/// `high`, an always-thinking route's `off` lands on its lowest tier, and a
-/// catalog `thinking: disabled` value the effort dialect cannot express lands
-/// on the catalog default. When two rungs collide, the one whose own value is
-/// the effective tier wins, so the row names what the route will receive.
-/// `Auto` always stays: it is the "leave it to the route" preference, not a
-/// tier, and is displayed as its own state.
+/// `high`, Z.ai GLM-5.2's `low` lands on `high`, an always-thinking route's
+/// `off` lands on its lowest tier, and a catalog `thinking: disabled` value
+/// the effort dialect cannot express lands on the catalog default. When two
+/// rungs collide, the one whose own value is the effective tier wins, so the
+/// row names what the route will receive. `Auto` always stays: it is the
+/// "leave it to the route" preference, not a tier, and is displayed as its
+/// own state. Routes whose effective tier cannot be proven (a custom endpoint,
+/// an enabled-but-untiered toggle) keep their rows.
 fn distinct_effective_efforts(
     efforts: Vec<ReasoningEffort>,
     provider: ApiProvider,
@@ -4509,7 +4536,7 @@ fn distinct_effective_efforts(
     wire_model: &str,
 ) -> Vec<ReasoningEffort> {
     let effective =
-        |effort: ReasoningEffort| effort.normalize_for_route(provider, base_url, wire_model);
+        |effort: ReasoningEffort| effective_tier_for_route(effort, provider, base_url, wire_model);
     let mut seen = Vec::with_capacity(efforts.len());
     let mut distinct = Vec::with_capacity(efforts.len());
     for &effort in &efforts {
