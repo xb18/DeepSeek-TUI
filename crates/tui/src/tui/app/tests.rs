@@ -1101,7 +1101,7 @@ fn zai_gateway_off_and_high_receipts_remain_unavailable() {
 #[test]
 fn kimi_code_high_and_max_work_receipts_preserve_exact_tiers() {
     for (previous, requested) in [
-        (ReasoningEffort::Off, ReasoningEffort::Low),
+        (ReasoningEffort::Auto, ReasoningEffort::Low),
         (ReasoningEffort::High, ReasoningEffort::Max),
     ] {
         let mut app = App::new(test_options(false), &Config::default());
@@ -7603,4 +7603,90 @@ fn owned_restore_moves_the_journal_and_matches_the_borrowing_restore() {
         legacy_borrowed.session_journal.entries.len()
     );
     assert_eq!(legacy_owned.api_message_stamps.len(), 2);
+}
+
+#[test]
+fn every_ctrl_t_press_changes_the_effective_thinking_tier() {
+    // #6650: Ctrl+T walked rungs that resolved to the tier already in effect
+    // (and a 9-rung private ladder under Auto routing), so presses looked dead.
+    let _catalog = crate::provider_lake::lock_live_snapshot();
+    for (provider, base_url, model, auto_model) in [
+        (
+            ApiProvider::Deepseek,
+            crate::config::DEFAULT_DEEPSEEK_BASE_URL,
+            "deepseek-v4.1-flash",
+            false,
+        ),
+        (
+            ApiProvider::Deepseek,
+            crate::config::DEFAULT_DEEPSEEK_BASE_URL,
+            "deepseek-v4.1",
+            false,
+        ),
+        (
+            ApiProvider::Deepseek,
+            crate::config::DEFAULT_DEEPSEEK_BASE_URL,
+            "deepseek-v4.1-flash",
+            true,
+        ),
+        (
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_MODEL,
+            false,
+        ),
+        (
+            ApiProvider::Xai,
+            crate::config::DEFAULT_XAI_BASE_URL,
+            crate::config::XAI_GROK_4_6_MODEL,
+            false,
+        ),
+    ] {
+        let mut app = App::new(test_options(false), &Config::default());
+        app.api_provider = provider;
+        app.auto_model = auto_model;
+        app.active_route_base_url = base_url.to_string();
+        app.model = model.to_string();
+        app.reasoning_effort = ReasoningEffort::Auto;
+        let ladder = crate::tui::model_picker::picker_efforts_for_route(
+            provider, base_url, model, auto_model,
+        );
+        let mut label = app.reasoning_effort_display_label();
+        let mut walked = Vec::new();
+        // Two full laps: the report was about presses after the first lap.
+        for press in 0..ladder.len() * 2 {
+            assert_eq!(app.cycle_effort(), SettingSelection::Changed);
+            let next = app.reasoning_effort_display_label();
+            assert_ne!(
+                next, label,
+                "{model} (auto={auto_model}) press {press} left the effective tier at {label}"
+            );
+            label = next;
+            walked.push(app.reasoning_effort);
+        }
+        let mut expected = ladder.clone();
+        expected.rotate_left(1);
+        expected.extend(expected.clone());
+        assert_eq!(
+            walked, expected,
+            "{model} (auto={auto_model}) walks the picker ladder"
+        );
+    }
+}
+
+#[test]
+fn ctrl_t_moves_past_a_persisted_alias_the_ladder_dropped() {
+    // DeepSeek has no `medium`; it resolves to `high`, so the next press must
+    // reach `max` rather than re-select `high`.
+    let _catalog = crate::provider_lake::lock_live_snapshot();
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Deepseek;
+    app.auto_model = false;
+    app.active_route_base_url = crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string();
+    app.model = "deepseek-v4.1-flash".to_string();
+    app.reasoning_effort = ReasoningEffort::Medium;
+
+    app.cycle_effort();
+
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Max);
 }

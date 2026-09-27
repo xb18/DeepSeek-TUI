@@ -58,6 +58,12 @@ quieter, and Fleet runs can be checked before they spend anything.
   replay the damage themselves when they return. That hold was added for the
   MATE flicker in [#6311](https://github.com/Hmbown/Codewhale/issues/6311)
   ([#6651](https://github.com/Hmbown/Codewhale/issues/6651)).
+- Every Ctrl+T press now changes the thinking tier you get. Ctrl+T walked
+  tiers the route treats as the same one — DeepSeek's `medium` is `high`,
+  and under Auto routing it stepped through a longer private list than the
+  `/model` picker shows — so some presses changed nothing. Ctrl+T and the
+  picker now share one list per route, with one entry per distinct tier
+  ([#6650](https://github.com/Hmbown/Codewhale/issues/6650)).
 - A top-level `base_url` or `api_key` in `config.toml` now means one thing
   everywhere. Every reader used its own rule for which routes inherited it,
   which is how a DeepSeek endpoint became the Xiaomi MiMo route's and failed

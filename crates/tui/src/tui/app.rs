@@ -3406,9 +3406,8 @@ impl App {
 
     /// Advance reasoning effort to the next tier for the active route and
     /// surface the change: set a status message and refresh the compaction
-    /// budget. Auto routing retains the full provider-neutral vocabulary until
-    /// dispatch; a concrete model walks the same ladder as `/model` and
-    /// `/effort`. Shared by the Ctrl+T shortcut (`cycle_effort`) and the
+    /// budget. Auto routing and concrete models alike walk the same ladder as
+    /// `/model` and `/effort`. Shared by the Ctrl+T shortcut (`cycle_effort`) and the
     /// hotbar `reasoning.cycle` action so the two paths cannot drift.
     pub(crate) fn apply_reasoning_effort_cycle(&mut self) {
         let requested = self.next_reasoning_effort_for_active_route();
@@ -3416,9 +3415,6 @@ impl App {
     }
 
     fn next_reasoning_effort_for_active_route(&self) -> ReasoningEffort {
-        if self.auto_model {
-            return self.reasoning_effort.cycle_next_for_auto_model();
-        }
         let (provider, base_url, model) = match self.active_reasoning_route_truth() {
             Some((provider, _, endpoint, model)) => (provider, endpoint, model),
             None => (
@@ -3427,9 +3423,30 @@ impl App {
                 self.model.as_str(),
             ),
         };
-        let efforts =
-            crate::tui::model_picker::picker_efforts_for_route(provider, base_url, model, false);
-        self.reasoning_effort.cycle_next_in(&efforts)
+        // The exact ladder the `/model` picker shows for this route, Auto
+        // routing included, so every press lands on a visibly different tier
+        // (#6650).
+        let efforts = crate::tui::model_picker::picker_efforts_for_route(
+            provider,
+            base_url,
+            model,
+            self.auto_model,
+        );
+        // A persisted value the ladder dropped as an alias (DeepSeek `medium`)
+        // enters at the rung it already resolves to, so the first press moves
+        // past it instead of re-selecting the same effective tier.
+        let current = self.reasoning_effort;
+        let anchor = if self.auto_model || efforts.contains(&current) {
+            current
+        } else {
+            let tier = current.normalize_for_route(provider, base_url, model);
+            if efforts.contains(&tier) {
+                tier
+            } else {
+                current
+            }
+        };
+        anchor.cycle_next_in(&efforts)
     }
 
     pub(crate) fn commit_reasoning_effort(&mut self, requested: ReasoningEffort) {

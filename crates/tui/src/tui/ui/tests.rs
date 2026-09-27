@@ -1158,14 +1158,13 @@ fn ctrl_t_cycles_reasoning_effort_under_auto_model() {
     app.auto_model = true;
     app.reasoning_effort = ReasoningEffort::Auto;
 
+    // Auto routing walks the `/model` picker's Auto ladder, not a longer
+    // private vocabulary (#6650).
     for expected in [
         ReasoningEffort::Off,
-        ReasoningEffort::Minimal,
         ReasoningEffort::Low,
         ReasoningEffort::Medium,
         ReasoningEffort::High,
-        ReasoningEffort::XHigh,
-        ReasoningEffort::Ultra,
         ReasoningEffort::Max,
         ReasoningEffort::Auto,
     ] {
@@ -15332,11 +15331,11 @@ fn hotbar_bound_reasoning_action_updates_auto_model_preference() {
         dispatch_hotbar_slot(&mut app, &config, 1).expect("reasoning slot dispatch"),
         Some(HotbarDispatch::AppAction(AppAction::UpdateCompaction(_)))
     ));
-    assert_eq!(app.reasoning_effort, ReasoningEffort::Minimal);
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
     assert!(
         app.status_message
             .as_deref()
-            .is_some_and(|message| message.contains("Reasoning effort: minimal"))
+            .is_some_and(|message| message.contains("Reasoning effort: low"))
     );
     assert!(app.needs_redraw);
 }
